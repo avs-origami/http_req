@@ -147,6 +147,11 @@ pub trait ThreadReceive {
     /// or `deadline` is exceeded. Writes received data into this writer.
     fn receive_all(&mut self, receiver: &Receiver<Vec<u8>>, deadline: Instant)
         -> Result<(), Error>;
+
+    /// Continuosly receives data from `receiver` until there is no more data
+    /// or `deadline` is exceeded. Writes received data into this writer.
+    fn receive_all_update(&mut self, receiver: &Receiver<Vec<u8>>, deadline: Instant, update: impl Fn(usize) -> ())
+        -> Result<(), Error>;
 }
 
 impl<T> ThreadReceive for T
@@ -190,6 +195,41 @@ where
 
         Ok(result?)
     }
+
+    fn receive_all_update(
+        &mut self,
+        receiver: &Receiver<Vec<u8>>,
+        deadline: Instant,
+        update: impl Fn(usize) -> (),
+    ) -> Result<(), Error> {
+        let mut result = Ok(());
+
+        execute_with_deadline(deadline, |remaining_time| {
+            let mut is_complete = false;
+
+            let data_read = match receiver.recv_timeout(remaining_time) {
+                Ok(data) => data,
+                Err(e) => {
+                    if e == RecvTimeoutError::Timeout {
+                        result = Err(Error::Timeout(RecvTimeoutError::Timeout));
+                    }
+                    return true;
+                }
+            };
+
+            if let Err(e) = self.write_all(&data_read).map_err(|e| Error::IO(e)) {
+                result = Err(e);
+                is_complete = true;
+            }
+
+            update(data_read.len());
+
+            is_complete
+        });
+
+        Ok(result?)
+    }
+
 }
 
 /// Connects to the target host with a specified timeout.
