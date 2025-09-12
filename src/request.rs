@@ -896,6 +896,95 @@ impl<'a> Request<'a> {
 
         Ok(response)
     }
+
+    /// Sends the HTTP request and returns `Response`.
+    ///
+    /// This method sets up a stream, writes the request message to it, and processes the response.
+    /// The connection is closed after processing. If the response indicates a redirect and the policy allows,
+    /// a new request is sent following the redirection.
+    ///
+    /// # Examples
+    /// ```
+    /// use http_req::{request::Request, uri::Uri};
+    /// use std::convert::TryFrom;
+    ///
+    /// let mut writer = Vec::new();
+    /// let uri: Uri = Uri::try_from("https://www.rust-lang.org/learn").unwrap();
+    ///
+    /// let response = Request::new(&uri).send(&mut writer).unwrap();
+    /// ```
+    pub fn send_with_update<T>(&mut self, writer: &mut T, update: impl Fn(usize) -> ()) -> Result<Response, error::Error>
+    where
+        T: Write,
+    {
+        // Set up a stream.
+        let mut stream = Stream::connect(self.message.uri, self.connect_timeout)?;
+        stream.set_read_timeout(self.read_timeout)?;
+        stream.set_write_timeout(self.write_timeout)?;
+
+        #[cfg(any(feature = "native-tls", feature = "rust-tls"))]
+        {
+            stream = Stream::try_to_https(stream, self.message.uri, self.root_cert_file_pem)?;
+        }
+
+        // Send the request message to the stream.
+        let request_msg = self.message.parse();
+        stream.write_all(&request_msg)?;
+
+        // Set up variables
+        let deadline = Instant::now() + self.timeout;
+        let (sender, receiver) = mpsc::channel();
+        let (sender_supp, receiver_supp) = mpsc::channel();
+        let mut raw_response_head: Vec<u8> = Vec::new();
+        let mut buf_reader = BufReader::new(stream);
+
+        // Read from the stream and send over data via `sender`.
+        thread::spawn(move || {
+            buf_reader.send_head(&sender);
+
+            let params: Vec<&str> = receiver_supp.recv().unwrap_or(Vec::new());
+            if !params.is_empty() && params.contains(&"non-empty") {
+                if params.contains(&"chunked") {
+                    let mut buf_reader = ChunkReader::from(buf_reader);
+                    buf_reader.send_all(&sender);
+                } else {
+                    buf_reader.send_all(&sender);
+                }
+            }
+        });
+
+        // Receive and process `head` of the response.
+        raw_response_head.receive(&receiver, deadline)?;
+        let response = Response::from_head(&raw_response_head)?;
+
+        if response.status_code().is_redirect() {
+            if let Some(location) = response.headers().get("Location") {
+                if self.redirect_policy.follow(&location) {
+                    let mut raw_uri = location.to_string();
+                    let uri = if Uri::is_relative(&raw_uri) {
+                        self.message.uri.from_relative(&mut raw_uri)
+                    } else {
+                        Uri::try_from(raw_uri.as_str())
+                    }?;
+
+                    return Request::new(&uri)
+                        .redirect_policy(self.redirect_policy)
+                        .send(writer);
+                }
+            }
+        }
+
+        let params = response.basic_info(&self.message.method).to_vec();
+        sender_supp.send(params)?;
+
+        // Receive and process `body` of the response.
+        let content_len = response.content_len().unwrap_or(1);
+        if content_len > 0 {
+            writer.receive_all_update(&receiver, deadline, update)?;
+        }
+
+        Ok(response)
+    }
 }
 
 /// Creates and sends a GET request. Returns the response for this request.
@@ -916,6 +1005,26 @@ where
 {
     let uri = Uri::try_from(uri.as_ref())?;
     Request::new(&uri).send(writer)
+}
+
+/// Creates and sends a GET request. Returns the response for this request.
+///
+/// # Examples
+/// ```
+/// use http_req::request;
+///
+/// let mut writer = Vec::new();
+/// const uri: &str = "https://www.rust-lang.org/learn";
+///
+/// let response = request::get(uri, &mut writer).unwrap();
+/// ```
+pub fn get_with_update<T, U>(uri: T, writer: &mut U, update: impl Fn(usize) -> ()) -> Result<Response, error::Error>
+where
+    T: AsRef<str>,
+    U: Write,
+{
+    let uri = Uri::try_from(uri.as_ref())?;
+    Request::new(&uri).send_with_update(writer, update)
 }
 
 /// Creates and sends a HEAD request. Returns the response for this request.

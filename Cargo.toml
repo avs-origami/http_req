@@ -14,7 +14,7 @@ edition = "2021"
 unicase = "^2.8"
 base64 = { version = "^0.22", optional = true }
 zeroize = { version = "^1.8", features = ["zeroize_derive"], optional = true }
-native-tls = { version = "^0.2", optional = true }
+native-tls = { version = "^0.2", features = ["vendored"], optional = true }
 rustls = { version = "^0.23", optional = true }
 rustls-pemfile = { version = "^2.2", optional = true }
 rustls-pki-types = { version = "^1.12", features = ["alloc"], optional = true }
